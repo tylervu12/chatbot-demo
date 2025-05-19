@@ -1,0 +1,10 @@
+python-dotenv
+openai
+pinecone-client
+langchain
+langchain_openai
+langchain_pinecone
+langchain-community
+pydantic
+pandas
+gradio 
