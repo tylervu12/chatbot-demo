@@ -90,9 +90,6 @@ chatbot-demo/
 ├── main.py             # Core RAG pipeline logic (embeddings, Pinecone query, LLM calls, validation)
 ├── requirements.txt    # Python package dependencies
 ├── README.md           # This file
-├── instructions.md     # Original system design instructions (for reference)
-└── datasets/           # Optional: For evaluation datasets like test-dataset1.csv
-    └── ...
 ```
 
 ## How It Works (Flow Overview)
