@@ -6,130 +6,153 @@ import uuid
 from main import (
     create_rag_chain,
     load_environment_variables,
-    FinalOutput, # The output schema of our RAG chain
-    ChunkOutput # Schema for chunks used - this is part of FinalOutput
+    FinalOutput # The output schema of our RAG chain
+    # ChunkOutput is part of FinalOutput, so direct import not strictly needed here
 )
 
-# Load environment variables (OpenAI, Pinecone, LangSmith keys)
-# This is crucial for the RAG chain to function.
+# --- App Initialization ---
+# Load environment variables and initialize the RAG chain once on startup.
+# This is crucial for the RAG chain to function and improves responsiveness.
+CHAIN_LOADED_SUCCESSFULLY = False
+RAG_CHAIN_INIT_ERROR_MESSAGE = "RAG chain is not initialized. Please check server logs."
+
 try:
-    load_environment_variables()
-    print("Environment variables loaded successfully for Gradio app.")
-    # Create the RAG chain instance once when the app loads
-    rag_chain = create_rag_chain()
-    print("RAG chain created successfully.")
+    load_environment_variables() # Ensures all keys (OpenAI, Pinecone, LangSmith) are loaded
+    print("INFO: Environment variables loaded successfully for Gradio app.")
+    rag_chain_instance = create_rag_chain()
+    print("INFO: RAG chain created successfully.")
     CHAIN_LOADED_SUCCESSFULLY = True
 except ValueError as e:
-    print(f"ERROR during app initialization: Missing environment variables: {e}")
-    CHAIN_LOADED_SUCCESSFULLY = False
-    # Define a placeholder rag_chain if loading failed, so the app can still run (with errors displayed)
-    def faulty_rag_chain(inputs):
-        return FinalOutput(
-            answer=f"Error: RAG Chain could not be initialized. {e}",
-            chunks_used=[],
-            validated=None,
-            manual_review_required=None
-        )
-    rag_chain = faulty_rag_chain
+    # Specific error for missing environment variables
+    RAG_CHAIN_INIT_ERROR_MESSAGE = f"ERROR: RAG Chain initialization failed due to missing environment variables: {e}. Ensure .env file is correct or secrets are set in deployment."
+    print(RAG_CHAIN_INIT_ERROR_MESSAGE)
 except Exception as e:
-    print(f"ERROR during app initialization: An unexpected error occurred: {e}")
-    CHAIN_LOADED_SUCCESSFULLY = False
-    def faulty_rag_chain_unexpected(inputs):
+    # Catch-all for other unexpected errors during initialization
+    RAG_CHAIN_INIT_ERROR_MESSAGE = f"ERROR: RAG Chain faced an unexpected error during initialization: {e}."
+    print(RAG_CHAIN_INIT_ERROR_MESSAGE)
+    import traceback
+    traceback.print_exc() # Print full traceback to server logs for debugging
+
+# Define a placeholder function if chain loading failed, to provide a graceful error in the UI
+if not CHAIN_LOADED_SUCCESSFULLY:
+    def faulty_rag_chain_placeholder(inputs: dict) -> FinalOutput:
         return FinalOutput(
-            answer=f"Error: RAG Chain faced an unexpected error during initialization. {e}",
+            answer=RAG_CHAIN_INIT_ERROR_MESSAGE,
             chunks_used=[],
             validated=None,
             manual_review_required=None
         )
-    rag_chain = faulty_rag_chain_unexpected
+    rag_chain_instance = faulty_rag_chain_placeholder
 
+# --- Gradio Interaction Logic ---
 def get_chatbot_response(user_query: str):
     """
-    Gets a response from the RAG chain and formats it for Gradio output.
+    Processes the user's query using the RAG chain and formats the response for Gradio display.
+    Handles errors gracefully and provides informative messages.
     """
-    if not CHAIN_LOADED_SUCCESSFULLY:
-        # If the chain didn't load, rag_chain is a placeholder that returns an error message.
-        # The placeholder function expects a dict, so we provide one.
-        output: FinalOutput = rag_chain({"user_query": user_query}) 
-        return output.answer, "Please check server logs for initialization errors.", ""
-
     if not user_query.strip():
         return "Please enter a question.", "", ""
 
-    print(f"Received query: {user_query}")
+    print(f"INFO: Received query from Gradio interface: \"{user_query}\"")
     
-    # Generate a unique trace ID for this specific run if desired for LangSmith
+    if not CHAIN_LOADED_SUCCESSFULLY:
+        # The RAG chain is already the placeholder function if initialization failed.
+        # The placeholder expects a dict, so provide one.
+        result: FinalOutput = rag_chain_instance({"user_query": user_query}) 
+        return result.answer, "Initialization Error. Check server logs.", ""
+
+    # Configure LangSmith tracing for this specific interaction
     trace_id = uuid.uuid4()
-    config = {
-        "metadata": {"user_id": "gradio_user", "session_id": str(trace_id)}, 
-        "tags": ["gradio_interaction"], 
+    run_config = {
+        "metadata": {"user_id": "gradio_user", "session_id": str(trace_id), "interaction_type": "chatbot_query"},
+        "tags": ["gradio_interaction", "chatbot"],
         "run_name": f"RAG_Gradio_Query_{trace_id}"
     }
 
     try:
-        result: FinalOutput = rag_chain.invoke({"user_query": user_query}, config=config)
+        result: FinalOutput = rag_chain_instance.invoke({"user_query": user_query}, config=run_config)
     except Exception as e:
-        print(f"Error invoking RAG chain: {e}")
-        # import traceback
-        # traceback.print_exc() # For more detailed server-side logging
-        return f"An error occurred while processing your question: {e}", "", ""
+        error_message = f"An error occurred while processing your question: {str(e)[:200]}..."
+        print(f"ERROR: Error invoking RAG chain: {e}")
+        # import traceback # Already imported if init failed
+        # traceback.print_exc() # Uncomment for detailed server-side debugging if needed
+        return error_message, "Could not retrieve sources due to an error.", "Error processing request."
 
+    # Format the answer
     answer_text = result.answer
+
+    # Format sources
     sources_text = "### Sources Used:\n\n"
     if result.chunks_used:
         for i, chunk in enumerate(result.chunks_used):
-            sources_text += f"**Source {i+1}: {chunk.title}** (Score: {chunk.score:.4f})\n"
-            sources_text += f"> {chunk.text[:300]}...\n\n" # Displaying first 300 chars of chunk text
+            # Ensure chunk object has expected attributes, provide defaults if not (robustness)
+            title = getattr(chunk, 'title', 'Unknown Title')
+            score = getattr(chunk, 'score', 0.0) # Default score to 0.0 if missing
+            text_snippet = getattr(chunk, 'text', 'No text preview available.')[:300] + "..."
+            
+            sources_text += f"**Source {i+1}: {title}** (Score: {score:.4f})\n"
+            sources_text += f"> {text_snippet}\n\n"
     else:
-        sources_text += "No specific document chunks were heavily relied upon for this answer, or the answer is a fallback response."
+        sources_text += "No specific document chunks were identified as primary sources, or the answer is a general fallback."
     
+    # Format validation information
     validation_info = ""
     if result.validated is False:
-        validation_info = "⚠️ This answer may not be fully aligned with provided documents. Manual review recommended."
+        validation_info = "⚠️ This answer may reference information outside of the provided documents. Manual review recommended."
     elif result.validated is True:
         validation_info = "✅ Answer validated against provided documents."
-    else: # validated is None (e.g. no chunks path)
-        validation_info = ""
+    # No specific message if validated is None (e.g., for fallback messages where validation might not apply)
 
     return answer_text, sources_text, validation_info
 
 # --- Gradio Interface Definition ---
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+# Using gr.Blocks for a more custom layout.
+# Theme can be adjusted (e.g., gr.themes.Default(), gr.themes.Glass(), gr.themes.Monochrome())
+with gr.Blocks(theme=gr.themes.Soft(), title="RAG Chatbot") as demo:
     gr.Markdown("""
     # 🤖 RAG Chatbot Demo
-    Ask a question to get an answer based on our knowledge base.
+    Ask a question about our services or knowledge base. The chatbot will use internal documents to find an answer.
     """)
     
     with gr.Row():
         with gr.Column(scale=2):
-            question_box = gr.Textbox(label="Your Question", placeholder="e.g., What are the best practices for SEO?")
-            submit_button = gr.Button("Ask Question", variant="primary")
+            question_box = gr.Textbox(
+                label="Your Question", 
+                placeholder="e.g., What are the best practices for SEO?",
+                lines=3
+            )
+            submit_button = gr.Button("Get Answer", variant="primary")
         with gr.Column(scale=3):
-            gr.Markdown("### Answer")
-            answer_output = gr.Markdown(value="Your answer will appear here...")
-            validation_output = gr.Markdown()
+            gr.Markdown("### Answer from Knowledge Base")
+            answer_output = gr.Markdown(value="Your answer will appear here once you ask a question.")
+            validation_output = gr.Markdown() # For validation status
 
-    gr.Markdown("---_Sources_---")
-    sources_output = gr.Markdown()
+    gr.Markdown("---_Retrieved Context & Sources_---")
+    sources_output = gr.Markdown(value="Details about the information used will appear here.")
     
-    # Linking the button to the function
+    # Event listener for the button click
     submit_button.click(
         fn=get_chatbot_response,
         inputs=question_box,
-        outputs=[answer_output, sources_output, validation_output]
+        outputs=[answer_output, sources_output, validation_output],
+        api_name="ask_chatbot" # Exposes this function via API if interface is launched with share=True or embedded
     )
     
+    # Provide example questions for users
     gr.Examples(
         examples=[
             "What are the best practices for onboarding new clients?",
             "How do you handle ad disapprovals?",
-            "What is the process for monthly reporting?",
-            "Tell me about our agency's approach to keyword research."
+            "What is our agency's approach to content marketing strategy?",
+            "Tell me about the monthly performance reporting process."
         ],
-        inputs=question_box
+        inputs=question_box,
+        label="Example Questions (click to try)"
     )
 
+# --- Main Execution Block (for local testing) ---
 if __name__ == "__main__":
-    print("Launching Gradio interface...")
-    # For local testing. When deploying to Hugging Face, HF Spaces runs app.py directly.
-    demo.launch(share=False) # Set share=True to get a public link for temporary sharing 
+    print("INFO: Launching Gradio interface locally...")
+    # To create a public link for temporary sharing, set share=True.
+    # For Hugging Face Spaces, HF handles the server; this block is mainly for local dev.
+    demo.launch(share=False) 
