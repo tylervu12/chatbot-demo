@@ -15,39 +15,52 @@ import uuid
 
 
 # --- Configuration and Initialization ---
+LANGSMITH_TRACING_ENABLED = False # Global flag
+
 def load_environment_variables():
-    """Loads environment variables from .env file and sets up LangSmith vars."""
+    """Loads environment variables from .env file and optionally sets up LangSmith vars."""
+    global LANGSMITH_TRACING_ENABLED
     load_dotenv()
 
-    # Fetch all potentially required environment variables first
+    # Core required environment variables
     app_openai_api_key = os.getenv("OPENAI_API_KEY")
     app_openai_embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL")
     app_pinecone_api_key = os.getenv("PINECONE_API_KEY")
     app_pinecone_index_name = os.getenv("PINECONE_INDEX_NAME")
-    app_langchain_api_key = os.getenv("LANGCHAIN_API_KEY") # For LangSmith
-    app_langchain_project = os.getenv("LANGCHAIN_PROJECT") # For LangSmith
 
-    # Check for missing critical environment variables
-    missing_vars = []
-    if not app_openai_api_key: missing_vars.append("OPENAI_API_KEY")
-    if not app_openai_embedding_model: missing_vars.append("OPENAI_EMBEDDING_MODEL")
-    if not app_pinecone_api_key: missing_vars.append("PINECONE_API_KEY")
-    if not app_pinecone_index_name: missing_vars.append("PINECONE_INDEX_NAME")
-    if not app_langchain_api_key: missing_vars.append("LANGCHAIN_API_KEY")
-    if not app_langchain_project: missing_vars.append("LANGCHAIN_PROJECT")
+    core_missing_vars = []
+    if not app_openai_api_key: core_missing_vars.append("OPENAI_API_KEY")
+    if not app_openai_embedding_model: core_missing_vars.append("OPENAI_EMBEDDING_MODEL")
+    if not app_pinecone_api_key: core_missing_vars.append("PINECONE_API_KEY")
+    if not app_pinecone_index_name: core_missing_vars.append("PINECONE_INDEX_NAME")
 
-    if missing_vars:
-        raise ValueError(f"Missing critical environment variables: {', '.join(missing_vars)}. Please ensure they are set in your .env file.")
+    if core_missing_vars:
+        raise ValueError(f"Missing core environment variables: {', '.join(core_missing_vars)}. These are required to run the application. Please ensure they are set in your .env file or deployment secrets.")
 
-    # Set LangSmith specific environment variables for LangChain to pick up
-    os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "true")
-    os.environ["LANGCHAIN_ENDPOINT"] = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
-    os.environ["LANGCHAIN_API_KEY"] = app_langchain_api_key
-    os.environ["LANGCHAIN_PROJECT"] = app_langchain_project
+    # Optional LangSmith environment variables
+    app_langchain_api_key = os.getenv("LANGCHAIN_API_KEY")
+    app_langchain_project = os.getenv("LANGCHAIN_PROJECT")
 
-load_environment_variables()
+    if app_langchain_api_key and app_langchain_project:
+        os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "true")
+        os.environ["LANGCHAIN_ENDPOINT"] = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+        os.environ["LANGCHAIN_API_KEY"] = app_langchain_api_key
+        os.environ["LANGCHAIN_PROJECT"] = app_langchain_project
+        LANGSMITH_TRACING_ENABLED = True
+        print("INFO: LangSmith API Key and Project found. Tracing enabled.")
+    else:
+        LANGSMITH_TRACING_ENABLED = False
+        # Unset them if they were somehow set previously without full config, to be safe
+        if "LANGCHAIN_TRACING_V2" in os.environ: del os.environ["LANGCHAIN_TRACING_V2"]
+        if "LANGCHAIN_API_KEY" in os.environ: del os.environ["LANGCHAIN_API_KEY"]
+        if "LANGCHAIN_PROJECT" in os.environ: del os.environ["LANGCHAIN_PROJECT"]
+        if "LANGCHAIN_ENDPOINT" in os.environ: del os.environ["LANGCHAIN_ENDPOINT"] # Could interfere if only partially set
+        print("INFO: LangSmith API Key or Project not found. Tracing is disabled.")
+
+load_environment_variables() # Load variables on import
 
 # Initialize API clients and models (globally for the module)
+# These will use the loaded environment variables.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -180,7 +193,7 @@ def create_rag_chain():
                        If no valid chunks, a fallback message is used.
     3. Validates answer: Another LLM call validates if the generated answer is grounded in the provided context.
     4. Formats output: The final response is structured according to the `FinalOutput` Pydantic model.
-    LangSmith tracing is automatically active if environment variables are configured.
+    LangSmith tracing is active if LANGCHAIN_API_KEY and LANGCHAIN_PROJECT are set in the environment.
     """
 
     def prepare_rag_input(input_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -277,7 +290,11 @@ def create_rag_chain():
 
 # --- Main Execution Block (for direct script execution and demonstration) ---
 if __name__ == "__main__":
-    print("System Initialized for direct execution. LangSmith tracing should be active if configured.")
+    # The LANGSMITH_TRACING_ENABLED flag is set by load_environment_variables()
+    if LANGSMITH_TRACING_ENABLED:
+        print("INFO: LangSmith tracing is active for this direct execution.")
+    else:
+        print("INFO: LangSmith tracing is NOT active for this direct execution (API key/project missing).")
     
     # Example query for demonstration
     test_query = "What are the best practices for onboarding new clients?"
@@ -286,17 +303,18 @@ if __name__ == "__main__":
     # Create and invoke the RAG chain
     rag_chain_instance = create_rag_chain()
     
-    # Example of adding specific metadata or tags to a LangSmith trace for this run
-    trace_id = uuid.uuid4()
-    run_config = {
-        "metadata": {"user_id": "example_user_main_script", "session_id": str(trace_id)},
-        "tags": ["direct_test_run", "example_usage"],
-        "run_name": f"RAG_Direct_Query_Run_{trace_id}"
-    }
+    run_config = None # Default to no specific config if tracing is off
+    if LANGSMITH_TRACING_ENABLED:
+        trace_id = uuid.uuid4()
+        run_config = {
+            "metadata": {"user_id": "example_user_main_script", "session_id": str(trace_id)},
+            "tags": ["direct_test_run", "example_usage"],
+            "run_name": f"RAG_Direct_Query_Run_{trace_id}"
+        }
     
     final_result_object: FinalOutput = rag_chain_instance.invoke(
         {"user_query": test_query},
-        config=run_config
+        config=run_config # Pass None if tracing is disabled, LangChain handles it
     )
 
     print("--- Final Output (Structured Object) ---")

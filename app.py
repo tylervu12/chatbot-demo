@@ -6,8 +6,8 @@ import uuid
 from main import (
     create_rag_chain,
     load_environment_variables,
-    FinalOutput # The output schema of our RAG chain
-    # ChunkOutput is part of FinalOutput, so direct import not strictly needed here
+    FinalOutput, # The output schema of our RAG chain
+    LANGSMITH_TRACING_ENABLED # Import the flag from main.py
 )
 
 # --- App Initialization ---
@@ -17,8 +17,14 @@ CHAIN_LOADED_SUCCESSFULLY = False
 RAG_CHAIN_INIT_ERROR_MESSAGE = "RAG chain is not initialized. Please check server logs."
 
 try:
-    load_environment_variables() # Ensures all keys (OpenAI, Pinecone, LangSmith) are loaded
-    print("INFO: Environment variables loaded successfully for Gradio app.")
+    # load_environment_variables() is called when main.py is imported,
+    # so LangSmith status is already determined.
+    print("INFO: Environment variables (including optional LangSmith) processed via main.py import.")
+    if LANGSMITH_TRACING_ENABLED:
+        print("INFO: LangSmith tracing is ENABLED for this Gradio app session.")
+    else:
+        print("INFO: LangSmith tracing is DISABLED for this Gradio app session (API key/project missing).")
+
     rag_chain_instance = create_rag_chain()
     print("INFO: RAG chain created successfully.")
     CHAIN_LOADED_SUCCESSFULLY = True
@@ -49,6 +55,7 @@ def get_chatbot_response(user_query: str):
     """
     Processes the user's query using the RAG chain and formats the response for Gradio display.
     Handles errors gracefully and provides informative messages.
+    Optionally sends trace data to LangSmith if configured.
     """
     if not user_query.strip():
         return "Please enter a question.", "", ""
@@ -61,13 +68,14 @@ def get_chatbot_response(user_query: str):
         result: FinalOutput = rag_chain_instance({"user_query": user_query}) 
         return result.answer, "Initialization Error. Check server logs.", ""
 
-    # Configure LangSmith tracing for this specific interaction
-    trace_id = uuid.uuid4()
-    run_config = {
-        "metadata": {"user_id": "gradio_user", "session_id": str(trace_id), "interaction_type": "chatbot_query"},
-        "tags": ["gradio_interaction", "chatbot"],
-        "run_name": f"RAG_Gradio_Query_{trace_id}"
-    }
+    run_config = None
+    if LANGSMITH_TRACING_ENABLED:
+        trace_id = uuid.uuid4()
+        run_config = {
+            "metadata": {"user_id": "gradio_user", "session_id": str(trace_id), "interaction_type": "chatbot_query"},
+            "tags": ["gradio_interaction", "chatbot"],
+            "run_name": f"RAG_Gradio_Query_{trace_id}"
+        }
 
     try:
         result: FinalOutput = rag_chain_instance.invoke({"user_query": user_query}, config=run_config)
